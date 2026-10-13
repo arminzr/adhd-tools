@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# adhd-decision-log — git pre-commit hook.
+# ADHD support: before EVERY commit is allowed, you must type ONE "next action".
+# This leaves a breadcrumb so that after the commit (a natural context-switch
+# point) you know exactly where to restart — kills "what was I doing?" paralysis.
+#
+# Idea source: adhd CLI run, shortlist idea #2 [N6 V9 F9].
+# Log file: <repo>/.decision_log.md   (append-only, chronological trail of intent)
+#
+# Bypass for a single commit:  DECISION_LOG_SKIP=1 git commit ...
+# Non-interactive commits (no TTY, e.g. CI/rebase/merge) auto-skip so they never hang.
+
+set -euo pipefail
+
+# Escape hatches -------------------------------------------------------------
+[ "${DECISION_LOG_SKIP:-0}" = "1" ] && exit 0
+# No usable controlling terminal (CI, rebase, `< /dev/null`, editor-driven) ->
+# don't block. Probe by actually trying to open /dev/tty for reading.
+if ! { exec 9<>/dev/tty; } 2>/dev/null; then
+  exit 0
+fi
+exec 9>&-
+# Merge / cherry-pick in progress -> skip (not a "next action" moment).
+GIT_DIR="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
+if [ -e "$GIT_DIR/MERGE_HEAD" ] || [ -e "$GIT_DIR/CHERRY_PICK_HEAD" ]; then
+  exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+LOG="$REPO_ROOT/.decision_log.md"
+
+# Read the answer from the real terminal even though stdin is the hook pipe.
+printf '\n\033[1m🧭 Decision Log\033[0m — before this commit, name the ONE next action.\n' > /dev/tty
+printf '   (empty = abort commit · this is your breadcrumb for after the context switch)\n' > /dev/tty
+printf '\033[36m   next action> \033[0m' > /dev/tty
+
+next_action=""
+if ! IFS= read -r next_action < /dev/tty; then
+  next_action=""
+fi
+
+# Trim whitespace.
+next_action="$(printf '%s' "$next_action" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+if [ -z "$next_action" ]; then
+  printf '\033[31m   aborted: no next action given.\033[0m\n' > /dev/tty
+  exit 1
+fi
+
+# Append the entry: timestamp, branch, staged-file count, the action.
+ts="$(date '+%Y-%m-%d %H:%M')"
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null | head -n1 | tr -d '\n' || true)"
+[ -z "$branch" ] && branch="(unborn)"
+staged="$(git diff --cached --name-only | wc -l | tr -d ' ')"
+
+if [ ! -f "$LOG" ]; then
+  printf '# Decision Log\n\nOne "next action" per commit. Newest at bottom.\n\n' >> "$LOG"
+fi
+printf -- '- **%s** `%s` (%s files staged) → %s\n' "$ts" "$branch" "$staged" "$next_action" >> "$LOG"
+
+printf '\033[32m   logged.\033[0m next: %s\n' "$next_action" > /dev/tty
+exit 0
